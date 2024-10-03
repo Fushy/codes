@@ -3,9 +3,8 @@ from queue import Queue
 import threading
 from time import sleep
 from random import choice
-from typing import Optional, Type
+from typing import Optional
 from collections import defaultdict
-from collections.abc import Iterable
 from datetime import datetime, timedelta
 import re
 from pathlib import Path
@@ -19,28 +18,34 @@ from matplotlib.ticker import MultipleLocator
 from peewee import Case, CharField, CompositeKey, DateTimeField, FloatField, ForeignKeyField, Model, PostgresqlDatabase, \
     PrimaryKeyField, fn, OperationalError, ModelSelect
 from requests import Response
+
+from Database import fill_rows, query_to_df
 from Threads import run
+from Times import now
+
+# Install Postgresql
 
 # config #
 # last_days_to_take_into_account = None
-last_days_to_take_into_account = 7
 boss_filter_on = True
 # boss_filter_on = False
 # blacklist_bosses = None
 blacklist_bosses = ["Generator", "Spaller"]
 blacklist_exact_bosses = None
 # bosses_exact_blacklist = ("Main Power Generator in Dark Poeta 1.9",)
+# db_name = "db"  # db_name must be on lower case for a dynamic creation
 
 # init #
-days = last_days_to_take_into_account
+min_session_number = 4000000
 healers = ("Chanter", "Cleric", "Templar")
-all_classes = ("Assassin", "Ranger", "Spiritmaster", "Sorcerer", "Chanter", "Cleric", "Gladiator", "Templar")
+all_classes = ("Assassin", "Ranger", "Spiritmaster", "Sorcerer", "Chanter", "Cleric", "Gladiator", "Templar", "Executor")
 allowed_servers = ("Atreia", "Tahabata")
 INDEX_ERROR_COUNT = 0
 LOCKER_CONSUME = 0
 consume_lock = threading.Lock()
-xxx = "".join(["a", "i", "o", "n"])
-db_name = xxx  # must be on lower case for a dynamic creation
+url_api = "".join(["m", "y", "a", "i", "o", "n", ".", "e", "u"])
+db_name = "".join(["a", "i", "o", "n"])
+# db_name = [char for char in url_api.split() if "." not in char]
 user = "postgres"
 password = "ale"
 try:
@@ -85,50 +90,14 @@ class PlayerFight(Model):
         primary_key = CompositeKey("name", "server", "boss_num")
 
 
-def now() -> datetime:
-    return datetime.now()
-
-
-def is_iter_but_not_str(element) -> bool:
-    """ If iterable object and not str"""
-    if isinstance(element, Iterable) and not isinstance(element, str):
-        return True
-    return False
-
-
-def query_to_df(query) -> DataFrame:
-    try:
-        return DataFrame(query.dicts())
-    except AttributeError:
-        print("query is None")
-
-
-def fill_rows(model: Type[Model], columns_order: list[str], values: list[list[object]] | list[object], update_key=None) -> None:
-    """ columns_order's names have to be the field name and not the column name. |columns_order|=|values| """
-    if type(values[0]) != list:
-        values = [values]
-    # noinspection PyProtectedMember
-    db_columns = list(model._meta.fields)
-    indexes_to_ignore = [columns_order.index(index) for index in set(columns_order) - set(db_columns)]
-    columns_order = [column for column in columns_order if column in db_columns]
-    rows = [dict(zip(columns_order, [value[i] for i in range(len(value)) if i not in indexes_to_ignore])) for value in values]
-    if update_key:
-        for record in rows:
-            update_conditions = [getattr(model, key) == record[key] for key in
-                                 (update_key if is_iter_but_not_str(update_key) else [update_key])]
-            final_condition = update_conditions[0]
-            for condition in update_conditions[1:]:
-                final_condition &= condition
-            model.update(**record).where(final_condition).execute()
-    else:
-        model.insert_many(rows).execute()
-
-
 def scrap_n_update_db():
+    """ Parse/gather data from 'url_api' and insert the data in a database at the same time
+    Beautifulsoup functions must be updated if the website elements position change
+    """
     global INDEX_ERROR_COUNT
 
     def get_response_page(i) -> Response:
-        url = f"https://my{xxx}.eu/PvESession/{i}"
+        url = f"https://{url_api}/PvESession/{i}"
         try:
             response = requests.get(url)
             if response is None:
@@ -141,8 +110,7 @@ def scrap_n_update_db():
 
     def scrap_page_n_update_db(index, page_response) -> None:
         def get_boss_time() -> tuple[datetime, datetime]:
-            # boss_duration = soup.find("h5").find_next_sibling("h5").text
-            session = soup.find("h5").next
+            session = soup.find("h6").next
             boss_date = session[len("Session: "):]
             pattern = r"(\d{2}\.\d{2}\.\d{4}) (\d{2}:\d{2}:\d{2}) - (\d{2}:\d{2}:\d{2})"
             date, start, end = re.match(pattern, boss_date).groups()
@@ -155,8 +123,8 @@ def scrap_n_update_db():
         def fill_boss_db(i) -> float:
             boss_start, boss_end = get_boss_time()
             boss_minutes = round((boss_end - boss_start).total_seconds() / 60, 2)
-            version_string = soup.find("h5").find_next_sibling(lambda tag: tag.name == "h5" and "Version" in tag.text).text
-            version = re.match(r".*: (\d+.?\d*)", version_string).groups()[0]
+            version_string = soup.find("h6").find_next_sibling(lambda tag: tag.name == "h6" and "Version" in tag.text).text
+            version = re.match(r".*: (?P<version>\d+.?\d*)", version_string).groups()[0]
             boss_name = soup.find("h2").text.strip() + " " + version
             player1_faction = "Elyos" if "Elyos" in soup.find_all("tr")[1].find_all("img")[0]["src"] else "Asmodian"
             fill_rows(Boss, ["num", "name", "server", "faction", "start", "minutes"],
@@ -195,7 +163,7 @@ def scrap_n_update_db():
 
         def fill_players_db(i) -> None:
             server_tr, player_tr, _, heal_tr, dmg_tr = find_index_field()
-            rows_player = soup.find_all("tr")[1:]
+            rows_player = soup.find_all("tr")[1:-1]
             for tr in rows_player:
                 fill_player_db(i, tr, server_tr, player_tr, heal_tr, dmg_tr)
 
@@ -204,14 +172,11 @@ def scrap_n_update_db():
         try:
             player1_server = soup.find_all("tr")[1].find_all("td")[1].text.strip()
             INDEX_ERROR_COUNT = 0
-            # if player1_server not in allowed_servers:
-            #     print_safe[index] += f"{player1_server} server"
-            #     return
         except IndexError:
             INDEX_ERROR_COUNT += 1
             print_safe[index] += f"IndexError {INDEX_ERROR_COUNT}"
             return
-        player_names = [tr.find_all("td")[0].text.strip() for tr in soup.find_all("tr")[1:]]
+        player_names = [tr.find_all("td")[0].text.strip() for tr in soup.find_all("tr")[1:-1]]
         not_allowed_characters = ["▋"]
         if sum((char in player_name) for char in not_allowed_characters for player_name in player_names) >= 2:
             # ▋ Happens when my_a_i_o_n doesn't recognize some characters in the player name
@@ -252,31 +217,34 @@ def scrap_n_update_db():
         LOCKER_CONSUME = False
 
     def consumer_when_full(tasks):
-        while True:
+        while consumer_when_full_alive:
             while not tasks.full():
                 sleep(0.01)
             consume(tasks)
 
+    consumer_when_full_alive = True
     batch_size, max_boss_num = 100, 0
     print_safe, queue = defaultdict(str), Queue(maxsize=batch_size)
     run(consumer_when_full, arguments={"tasks": queue}, daemon=True)
     # db.drop_tables([Boss, PlayerFight])
     db.create_tables([Boss, PlayerFight])
-    max_boss_num = Boss.select(fn.MAX(Boss.num)).scalar()
-    index_page = (max_boss_num or 1800000) - 1
-    # index_page = 2700000
+    max_boss_num = Boss.select(fn.MAX(Boss.num)).scalar() or 0
+    index_page = (max_boss_num or min_session_number) - 1
+    # index_page = min_session_number - 1
     while True:
         index_page += 1
         is_present = len(list(Boss.select().where(Boss.num == index_page).limit(1))) > 0
         if is_present:
+            print(f"{index_page} already parsed")
             continue
         while queue.full():
             sleep(0.01)
-        if index_page > max_boss_num and INDEX_ERROR_COUNT > 100:
+        if index_page > max_boss_num and INDEX_ERROR_COUNT > 10000:
             # consume(tasks)
             print("All validate page has been parsed")
             return
         queue.put(partial(db_insert_pvesession, index_page))
+    consumer_when_full_alive = False
     db.close()
 
 
@@ -531,17 +499,20 @@ def spot_admin() -> tuple[ModelSelect, ModelSelect]:
     for _, players in sorted(admins.items(), key=lambda x: -len(x[1])):
         for player in players:
             boss_name = bosses_admin_spotted.select(Boss.name).where(Boss.num == player.boss_num).get().name
-            print(f"https://my{xxx}.eu/PvESession/{player.boss_num}", player.name, player.server, len(players), boss_name)
+            print(f"https://{url_api}/PvESession/{player.boss_num}", player.name, player.server, len(players), boss_name)
     return players_admin_spotted, players_admin_spotted_with_num
 
 
 def player_infos(player_name, last_days=None) -> None:
     teammates = query_to_df(get_teammates_from_player(player_name, last_days))  # todo isolate instances
-    # print(player_rank(player_name, last_days))
-    # print(top_team_dps_on(player_name, last_days))
-    # average_dps_n_amount_bosses_done_for_a_player = query_to_df(get_bosses_from_player(player_name, last_days))
-    # all_bosses_done_for_a_player = query_to_df(get_bosses_from_player(player_name, last_days, groupby_name=False))
-    "dataframe opening"
+    print(player_rank(player_name, last_days))
+    print(top_team_dps_on(player_name, last_days))
+    average_dps_n_amount_bosses_done_for_a_player = query_to_df(get_bosses_from_player(player_name, last_days))
+    all_bosses_done_for_a_player = query_to_df(get_bosses_from_player(player_name, last_days, groupby_name=False))
+    if not all_bosses_done_for_a_player.empty:
+        print(player_name, "10 last bosses")
+        print(all_bosses_done_for_a_player["start"][:10])
+    _ = "debug breakpoint"
 
 
 def fight_infos(num) -> ModelSelect:
@@ -637,17 +608,20 @@ def plot_classes_vps_over_time(top=None):
 
 
 def get_random_player_name(last_days=None, faction=None):
-    return choice(list(default_player_select(last_days, faction)
-                       .select(PlayerFight.name).distinct().where(PlayerFight.class_ << all_classes))).name
+    return choice(
+        list(default_player_select(last_days, faction).select(PlayerFight.name).distinct().where(PlayerFight.class_ << all_classes))).name
 
 
 if __name__ == "__main__":
+    days = None
+    # days = 15
     scrap_n_update_db()
 
-    # player_name = get_random_player_name(days)
+    # player_name = get_random_player_name()
+    # player_infos(player_name, days)
     # players_admin_spotted, players_admin_spotted_with_num = map(query_to_df, spot_admin())
-    #
-    # boss_instance_info = query_to_df(fight_infos(2000000))
+    # query_to_df(players_ranking(all_classes, days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
+    # boss_instance_info = query_to_df(fight_infos(4000000))
     # classes_ranking_sorted_by_dps = query_to_df(classes_ranking(days))
     # players_ranking_sorted_by_dps = query_to_df(players_ranking(all_classes, days))
     # players_ranking_sorted_by_hps = query_to_df(players_ranking(all_classes, days, dps_or_heal="hps"))
@@ -656,14 +630,14 @@ if __name__ == "__main__":
     # dps_ranking_for_given_bosses = query_to_df(players_ranking(all_classes, days, groupby_name=True, boss_names=["Taha"]))
     # amount_bosses_ranking = query_to_df(bosses_ranking(days, sort_key="name"))
     # time_elapsed_bosses_ranking = query_to_df(bosses_ranking(days, sort_key="minutes"))
-    # players_ranking_for_killed_bosses = query_to_df(players_ranking(all_classes, days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
+    # players_ranking_for_killed_bosses = query_to_df(
+    #     players_ranking(all_classes, days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
     # players_ranking_for_killed_named_bosses = query_to_df(
     #     players_ranking(all_classes, days, groupby_name=True, boss_names=["Taha"]).order_by(fn.COUNT(PlayerFight.name).desc()))
     # all_bosses_sorted_by_date = query_to_df(default_boss_select(days).order_by(Boss.start))
     # all_average_team_dps_n_dps_for_each_teammate = query_to_df(bosses_players_value_ranking(days))
     # all_average_team_hps_n_hps_for_each_teammate = query_to_df(bosses_players_value_ranking(days, dps_or_heal="hps"))
     # average_team_dps_n_average_class_dps_for_each_boss = query_to_df(bosses_players_value_ranking(days, groupeby_name=True))
-
     # plot_players_over_time_tagged()
-    plot_classes_vps_over_time(100)
-    "dataframe opening"
+    # plot_classes_vps_over_time(100)
+    _ = "debug breakpoint"
