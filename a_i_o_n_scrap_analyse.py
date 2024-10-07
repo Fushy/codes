@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import re
 from pathlib import Path
 
+import numpy as np
 from pandas import DataFrame
 from psycopg2 import connect
 import requests
@@ -36,7 +37,6 @@ blacklist_exact_bosses = None
 # db_name = "db"  # db_name must be on lower case for a dynamic creation
 
 # init #
-min_session_number = 4000000
 healers = ("Chanter", "Cleric", "Templar")
 all_classes = ("Assassin", "Ranger", "Spiritmaster", "Sorcerer", "Chanter", "Cleric", "Gladiator", "Templar", "Executor")
 allowed_servers = ("Atreia", "Tahabata")
@@ -90,7 +90,7 @@ class PlayerFight(Model):
         primary_key = CompositeKey("name", "server", "boss_num")
 
 
-def scrap_n_update_db():
+def scrap_n_update_db(start_index=4000000):
     """ Parse/gather data from 'url_api' and insert the data in a database at the same time
     Beautifulsoup functions must be updated if the website elements position change
     """
@@ -148,7 +148,7 @@ def scrap_n_update_db():
             assert all(map(lambda x: x is not None, [server_tr, player_tr, dps_tr, heal_tr]))
             return server_tr, player_tr, dps_tr, heal_tr, dmg_tr
 
-        def fill_player_db(i, tr, server_tr, player_tr, heal_tr, dmg_tr) -> None:
+        def fill_player_db(i, tr, server_tr, player_tr, heal_tr, dmg_tr) -> Optional[str]:
             player_data = tr.find_all("td")
             player_name = player_data[player_tr].text.strip()
             player_faction = "Elyos" if "Elyos" in player_data[0].find_all("img")[0]["src"] else "Asmodian"
@@ -158,14 +158,22 @@ def scrap_n_update_db():
             player_heal = float(player_data[heal_tr].text.strip().replace(",", "").replace(".", ""))
             player_dps = int(player_dmg / seconds)
             player_hps = int(player_heal / seconds)
-            fill_rows(PlayerFight, ["name", "server", "faction", "class_", "dps", "hps", "boss_num"],
-                      [player_name, player_server, player_faction, player_class, player_dps, player_hps, i])
+            # TODO for asian servers, servers allow duplicate (name, server, boss_num) : replace to (id_char, server, boss_num)
+            if not PlayerFight.select().where((PlayerFight.name == player_name) &
+                                              (PlayerFight.server == player_server) &
+                                              (PlayerFight.boss_num == i)).exists():
+                fill_rows(PlayerFight, ["name", "server", "faction", "class_", "dps", "hps", "boss_num"],
+                          [player_name, player_server, player_faction, player_class, player_dps, player_hps, i])
+            else:
+                return "duplicate"
 
         def fill_players_db(i) -> None:
             server_tr, player_tr, _, heal_tr, dmg_tr = find_index_field()
             rows_player = soup.find_all("tr")[1:-1]
             for tr in rows_player:
-                fill_player_db(i, tr, server_tr, player_tr, heal_tr, dmg_tr)
+                if fill_player_db(i, tr, server_tr, player_tr, heal_tr, dmg_tr) == "duplicate":
+                    PlayerFight.delete().where(PlayerFight.boss_num == i).execute()
+                    return
 
         global INDEX_ERROR_COUNT, LOCKER_CONSUME
         soup = BeautifulSoup(page_response.text, "html.parser")
@@ -185,7 +193,7 @@ def scrap_n_update_db():
             print_safe[index] += f"pass {player_names}"
             return
         minutes = fill_boss_db(index)
-        seconds = minutes * 60
+        seconds = minutes * 60 or 1
         fill_players_db(index)
 
     def db_insert_pvesession(index):
@@ -229,7 +237,7 @@ def scrap_n_update_db():
     # db.drop_tables([Boss, PlayerFight])
     db.create_tables([Boss, PlayerFight])
     max_boss_num = Boss.select(fn.MAX(Boss.num)).scalar() or 0
-    index_page = (max_boss_num or min_session_number) - 1
+    index_page = (max_boss_num or start_index) - 1
     # index_page = min_session_number - 1
     while True:
         index_page += 1
@@ -308,8 +316,8 @@ def players_ranking(whitelist_classes: tuple, last_days=None, dps_or_heal="dps",
 
 def player_rank(name=None, last_days=None) -> Optional[str]:
     name = name.capitalize()
-    player = list(PlayerFight.select().where((PlayerFight.name == name) & (PlayerFight.server << allowed_servers)).limit(1))
-    if len(player) == 0:
+    player = PlayerFight.select().where((PlayerFight.name == name) & (PlayerFight.server << allowed_servers))
+    if not player.exists():
         print(name, "player not found")
         return
     player = player[0]
@@ -565,44 +573,48 @@ def plot_players_over_time_tagged():
     plt.show()
 
 
-def plot_classes_vps_over_time(top=None):
-    start = Boss.select(fn.MIN(Boss.start)).scalar().replace(hour=0, minute=0, second=0, microsecond=0)
+def plot_classes_vps_over_time(top=None, last_days=None):
+    start = (now() - timedelta(days=last_days) if last_days
+             else Boss.select(fn.MIN(Boss.start)).scalar().replace(hour=0, minute=0, second=0, microsecond=0))
     end = Boss.select(fn.MAX(Boss.start)).scalar().replace(hour=0, minute=0, second=0, microsecond=0)
     cursor = start
     classes_ranking_over_time = DataFrame(columns=list(all_classes))
     while cursor < end:
         next_day = cursor + timedelta(days=1)
-        if top is None:
-            query = (default_player_select(minutes=0.5, join_boss=boss_filter_on)
+        if top:
+            case_statements = [Case(None, ((PlayerFight.class_ == class_, (PlayerFight.dps + PlayerFight.hps)),)
+                                    ).alias(class_) for class_ in all_classes]
+            # case_statements += [PlayerFight.name, PlayerFight.boss_num]
+            query = (default_player_select(minutes=0.5, join_boss=boss_filter_on, last_days=last_days)
+                     .where(Boss.start.between(cursor, next_day))
+                     .select(*case_statements)
+                     .order_by((PlayerFight.dps + PlayerFight.hps).desc()))
+            df = query_to_df(query).replace({None: np.nan})
+            dps_dict = {
+                class_: 0 if np.isnan(df[class_].nlargest(top).mean()) else df[class_].nlargest(top).mean() for class_ in df.columns}
+        else:
+            query = (default_player_select(minutes=0.5, join_boss=boss_filter_on, last_days=last_days)
                      .select(PlayerFight.class_.alias("class"),
                              (fn.AVG(PlayerFight.dps) + fn.AVG(PlayerFight.hps)).alias("vps"))
                      .where(Boss.start.between(cursor, next_day))
                      .group_by(PlayerFight.class_)
                      .order_by(fn.AVG(PlayerFight.dps) + fn.AVG(PlayerFight.hps)))
-            classes_ranking_df = query_to_df(query)
-            dps_dict = {class_: vps for class_, vps in zip(classes_ranking_df["class"], classes_ranking_df["vps"])}
-        else:
-            case_statements = [Case(None, ((PlayerFight.class_ == class_, (PlayerFight.dps + PlayerFight.hps)),)
-                                    ).alias(class_) for class_ in all_classes]
-            query = (default_player_select(minutes=0.5, join_boss=boss_filter_on)
-                     .where(Boss.start.between(cursor, next_day))
-                     .select(*case_statements)
-                     .order_by((PlayerFight.dps + PlayerFight.hps).desc()))
-            df = query_to_df(query)
-            dps_dict = {class_: df[class_].nlargest(top).mean() for class_ in df.columns}
+            classes_ranking_df = query_to_df(query).replace({None: np.nan})
+            dps_dict = {
+                class_: vps if np.isnan(vps) else vps for class_, vps in zip(classes_ranking_df["class"], classes_ranking_df["vps"])}
         print(cursor.date())
         classes_ranking_over_time.loc[cursor.date()] = dps_dict
         cursor = next_day
-    plt, ax, fig = init_plt(title=f"Classes top{top} values per second average per day")
+    plt, ax, fig = init_plt(title="Classes{} values per second average per day".format(f" top {top}" if top else ""))
     for class_ in all_classes:
         classes_ranking_over_time[class_].plot(kind="line", label=class_)
     date_format = "%Y-%m-%d"
     ax.yaxis.tick_right()
     ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter(date_format))
-    ax.xaxis.set_major_locator(MultipleLocator(6))
+    ax.xaxis.set_major_locator(MultipleLocator((end - start).days // 20))
     plt.setp(ax.get_xticklabels(), rotation=15, fontsize=10)
     ax.xaxis.set_minor_locator(plt.NullLocator())
-    plt.xlabel("Date"), plt.ylabel("Top {} Value per second".format(top or "", "Value per second"))
+    plt.xlabel("Date"), plt.ylabel("{}Value per second".format(f"Top {top} " if top else "", "Value per second"))
     [text.set_color("white") for text in plt.legend().get_texts()]
     plt.show()
 
@@ -613,31 +625,32 @@ def get_random_player_name(last_days=None, faction=None):
 
 
 if __name__ == "__main__":
-    days = None
-    # days = 15
+    # last_days = None
+    last_days = 15
     scrap_n_update_db()
 
-    # player_name = get_random_player_name()
-    # player_infos(player_name, days)
-    # players_admin_spotted, players_admin_spotted_with_num = map(query_to_df, spot_admin())
-    # query_to_df(players_ranking(all_classes, days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
-    # boss_instance_info = query_to_df(fight_infos(4000000))
-    # classes_ranking_sorted_by_dps = query_to_df(classes_ranking(days))
-    # players_ranking_sorted_by_dps = query_to_df(players_ranking(all_classes, days))
-    # players_ranking_sorted_by_hps = query_to_df(players_ranking(all_classes, days, dps_or_heal="hps"))
-    # _class__players_ranking_sorted_by_dps = query_to_df(players_ranking(("Templar",), days, faction="Asmodian"))
-    # dps_ranking_for_each_boss = query_to_df(players_ranking(all_classes, days, groupby_name=False))
-    # dps_ranking_for_given_bosses = query_to_df(players_ranking(all_classes, days, groupby_name=True, boss_names=["Taha"]))
-    # amount_bosses_ranking = query_to_df(bosses_ranking(days, sort_key="name"))
-    # time_elapsed_bosses_ranking = query_to_df(bosses_ranking(days, sort_key="minutes"))
-    # players_ranking_for_killed_bosses = query_to_df(
-    #     players_ranking(all_classes, days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
-    # players_ranking_for_killed_named_bosses = query_to_df(
-    #     players_ranking(all_classes, days, groupby_name=True, boss_names=["Taha"]).order_by(fn.COUNT(PlayerFight.name).desc()))
-    # all_bosses_sorted_by_date = query_to_df(default_boss_select(days).order_by(Boss.start))
-    # all_average_team_dps_n_dps_for_each_teammate = query_to_df(bosses_players_value_ranking(days))
-    # all_average_team_hps_n_hps_for_each_teammate = query_to_df(bosses_players_value_ranking(days, dps_or_heal="hps"))
-    # average_team_dps_n_average_class_dps_for_each_boss = query_to_df(bosses_players_value_ranking(days, groupeby_name=True))
-    # plot_players_over_time_tagged()
-    # plot_classes_vps_over_time(100)
+    player_name = get_random_player_name()
+    player_infos(player_name, last_days)
+    players_admin_spotted, players_admin_spotted_with_num = map(query_to_df, spot_admin())
+    query_to_df(players_ranking(all_classes, last_days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
+    boss_instance_info = query_to_df(fight_infos(4000000))
+    classes_ranking_sorted_by_dps = query_to_df(classes_ranking(last_days))
+    players_ranking_sorted_by_dps = query_to_df(players_ranking(all_classes, last_days))
+    players_ranking_sorted_by_hps = query_to_df(players_ranking(all_classes, last_days, dps_or_heal="hps"))
+    _class__players_ranking_sorted_by_dps = query_to_df(players_ranking(("Templar",), last_days, faction="Asmodian"))
+    dps_ranking_for_each_boss = query_to_df(players_ranking(all_classes, last_days, groupby_name=False))
+    dps_ranking_for_given_bosses = query_to_df(players_ranking(all_classes, last_days, groupby_name=True, boss_names=["Taha"]))
+    amount_bosses_ranking = query_to_df(bosses_ranking(last_days, sort_key="name"))
+    time_elapsed_bosses_ranking = query_to_df(bosses_ranking(last_days, sort_key="minutes"))
+    players_ranking_for_killed_bosses = query_to_df(
+        players_ranking(all_classes, last_days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
+    players_ranking_for_killed_named_bosses = query_to_df(
+        players_ranking(all_classes, last_days, groupby_name=True, boss_names=["Taha"]).order_by(fn.COUNT(PlayerFight.name).desc()))
+    all_bosses_sorted_by_date = query_to_df(default_boss_select(last_days).order_by(Boss.start))
+    all_average_team_dps_n_dps_for_each_teammate = query_to_df(bosses_players_value_ranking(last_days))
+    all_average_team_hps_n_hps_for_each_teammate = query_to_df(bosses_players_value_ranking(last_days, dps_or_heal="hps"))
+    average_team_dps_n_average_class_dps_for_each_boss = query_to_df(bosses_players_value_ranking(last_days, groupeby_name=True))
+    plot_players_over_time_tagged()
+    plot_classes_vps_over_time(top=200, last_days=60)
+    plot_classes_vps_over_time()
     _ = "debug breakpoint"
