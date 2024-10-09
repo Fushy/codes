@@ -1,33 +1,27 @@
-from functools import partial
-from queue import Queue
+import re
 import threading
-from time import sleep
-from random import choice
-from typing import Optional
 from collections import defaultdict
 from datetime import datetime, timedelta
-import re
+from functools import partial
 from pathlib import Path
+from queue import Queue
+from random import choice
+from time import sleep
+from typing import Optional
 
-import numpy as np
-from pandas import DataFrame
-from psycopg2 import connect
-import requests
 import matplotlib
+import numpy as np
+import requests
 from bs4 import BeautifulSoup
 from matplotlib.ticker import MultipleLocator
-from peewee import Case, CharField, CompositeKey, DateTimeField, FloatField, ForeignKeyField, Model, PostgresqlDatabase, \
-    PrimaryKeyField, fn, OperationalError, ModelSelect
+from pandas import DataFrame
+from peewee import Case, CharField, CompositeKey, DateTimeField, FloatField, fn, ForeignKeyField, Model, ModelSelect, OperationalError, PostgresqlDatabase, PrimaryKeyField
+from psycopg2 import connect
 from requests import Response
 
-from Database import fill_rows, query_to_df
-from Threads import run
-from Times import now
-
-# Install Postgresql
+from util import fill_rows, now, query_to_df, run
 
 # config #
-# last_days_to_take_into_account = None
 boss_filter_on = True
 # boss_filter_on = False
 # blacklist_bosses = None
@@ -48,6 +42,7 @@ db_name = "".join(["a", "i", "o", "n"])
 # db_name = [char for char in url_api.split() if "." not in char]
 user = "postgres"
 password = "ale"
+# Install Postgresql
 try:
     db = PostgresqlDatabase(db_name, user=user, password=password)
     db.connect()
@@ -627,30 +622,30 @@ def get_random_player_name(last_days=None, faction=None):
 if __name__ == "__main__":
     # last_days = None
     last_days = 15
-    scrap_n_update_db()
+    # scrap_n_update_db()
 
-    player_name = get_random_player_name()
-    player_infos(player_name, last_days)
-    players_admin_spotted, players_admin_spotted_with_num = map(query_to_df, spot_admin())
-    query_to_df(players_ranking(all_classes, last_days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
-    boss_instance_info = query_to_df(fight_infos(4000000))
-    classes_ranking_sorted_by_dps = query_to_df(classes_ranking(last_days))
-    players_ranking_sorted_by_dps = query_to_df(players_ranking(all_classes, last_days))
-    players_ranking_sorted_by_hps = query_to_df(players_ranking(all_classes, last_days, dps_or_heal="hps"))
-    _class__players_ranking_sorted_by_dps = query_to_df(players_ranking(("Templar",), last_days, faction="Asmodian"))
-    dps_ranking_for_each_boss = query_to_df(players_ranking(all_classes, last_days, groupby_name=False))
-    dps_ranking_for_given_bosses = query_to_df(players_ranking(all_classes, last_days, groupby_name=True, boss_names=["Taha"]))
-    amount_bosses_ranking = query_to_df(bosses_ranking(last_days, sort_key="name"))
-    time_elapsed_bosses_ranking = query_to_df(bosses_ranking(last_days, sort_key="minutes"))
-    players_ranking_for_killed_bosses = query_to_df(
-        players_ranking(all_classes, last_days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
-    players_ranking_for_killed_named_bosses = query_to_df(
-        players_ranking(all_classes, last_days, groupby_name=True, boss_names=["Taha"]).order_by(fn.COUNT(PlayerFight.name).desc()))
-    all_bosses_sorted_by_date = query_to_df(default_boss_select(last_days).order_by(Boss.start))
-    all_average_team_dps_n_dps_for_each_teammate = query_to_df(bosses_players_value_ranking(last_days))
-    all_average_team_hps_n_hps_for_each_teammate = query_to_df(bosses_players_value_ranking(last_days, dps_or_heal="hps"))
-    average_team_dps_n_average_class_dps_for_each_boss = query_to_df(bosses_players_value_ranking(last_days, groupeby_name=True))
-    plot_players_over_time_tagged()
+    # player_name = get_random_player_name()
+    # player_infos(player_name, last_days)
+    # players_admin_spotted, players_admin_spotted_with_num = map(query_to_df, spot_admin())
+    # query_to_df(players_ranking(all_classes, last_days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
+    # boss_instance_info = query_to_df(fight_infos(4000000))
+    # classes_ranking_sorted_by_dps = query_to_df(classes_ranking(last_days))
+    # players_ranking_sorted_by_dps = query_to_df(players_ranking(all_classes, last_days))
+    # players_ranking_sorted_by_hps = query_to_df(players_ranking(all_classes, last_days, dps_or_heal="hps"))
+    # _class__players_ranking_sorted_by_dps = query_to_df(players_ranking(("Templar",), last_days, faction="Asmodian"))
+    # dps_ranking_for_each_boss = query_to_df(players_ranking(all_classes, last_days, groupby_name=False))
+    # dps_ranking_for_given_bosses = query_to_df(players_ranking(all_classes, last_days, groupby_name=True, boss_names=["Taha"]))
+    # amount_bosses_ranking = query_to_df(bosses_ranking(last_days, sort_key="name"))
+    # time_elapsed_bosses_ranking = query_to_df(bosses_ranking(last_days, sort_key="minutes"))
+    # players_ranking_for_killed_bosses = query_to_df(
+    #     players_ranking(all_classes, last_days, groupby_name=True).order_by(fn.COUNT(PlayerFight.name).desc()))
+    # players_ranking_for_killed_named_bosses = query_to_df(
+    #     players_ranking(all_classes, last_days, groupby_name=True, boss_names=["Taha"]).order_by(fn.COUNT(PlayerFight.name).desc()))
+    # all_bosses_sorted_by_date = query_to_df(default_boss_select(last_days).order_by(Boss.start))
+    # all_average_team_dps_n_dps_for_each_teammate = query_to_df(bosses_players_value_ranking(last_days))
+    # all_average_team_hps_n_hps_for_each_teammate = query_to_df(bosses_players_value_ranking(last_days, dps_or_heal="hps"))
+    # average_team_dps_n_average_class_dps_for_each_boss = query_to_df(bosses_players_value_ranking(last_days, groupeby_name=True))
+    # plot_players_over_time_tagged()
     plot_classes_vps_over_time(top=200, last_days=60)
     plot_classes_vps_over_time()
     _ = "debug breakpoint"
