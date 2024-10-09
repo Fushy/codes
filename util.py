@@ -77,9 +77,7 @@ def printc(text: str, color="green", background_color=None, attributes: Iterable
 
 def is_iter_but_not_str(element):
     """ Si le type de l'objet peut être parcouru et n'est pas de type str"""
-    if isinstance(element, Iterable) and not isinstance(element, str):
-        return True
-    return False
+    return isinstance(element, Iterable) and not isinstance(element, str)
 
 
 def get_columns_name_model(model: Type[Model]):
